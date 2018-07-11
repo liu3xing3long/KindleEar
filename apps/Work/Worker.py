@@ -24,6 +24,7 @@ from calibre.utils.bytestringio import byteStringIO
 from books import BookClasses, BookClass
 from books.base import BaseFeedBook, BaseComicBook
 from books.comic.cartoonmadbase import CartoonMadBaseBook
+from books.comic.tencentbase import TencentBaseBook
     
 #实际下载文章和生成电子书并且发送邮件
 class Worker(BaseHandler):
@@ -31,6 +32,7 @@ class Worker(BaseHandler):
     def GET(self):
         username = web.input().get("u")
         bookid = web.input().get("id")
+        feedsId = web.input().get("feedsId")
         
         user = KeUser.all().filter("name = ", username).get()
         if not user:
@@ -54,6 +56,11 @@ class Worker(BaseHandler):
                 continue
                 #return "id of book is invalid or book not exist!<br />"
         
+        #Deliver only some feeds in custom rss
+        if feedsId:
+            feedsId = [int(item) for item in feedsId.split('|') if item.isdigit()]
+            feedsId = [Feed.get_by_id(item) for item in feedsId if Feed.get_by_id(item)]
+
         book4meta = None
         if len(bks) == 0:
             return "No have book to push!"
@@ -165,10 +172,10 @@ class Worker(BaseHandler):
                 book.keep_image = bk.keep_image
                 book.oldest_article = bk.oldest_article
                 book.fulltext_by_readability = True
-                feeds = bk.feeds
+                feeds = feedsId if feedsId else bk.feeds
                 book.feeds = []
                 for feed in feeds:
-                    if feed.url.startswith("http://www.cartoonmad.com"):
+                    if feed.url.startswith( ("http://www.cartoonmad.com", "http://ac.qq.com", "http://m.ac.qq.com") ) :
                         self.ProcessComicRSS(username, user, feed)
                     else:
                         book.feeds.append((feed.title, feed.url, feed.isfulltext))
@@ -335,8 +342,8 @@ class Worker(BaseHandler):
         
         #新生成的图片再整体缩小到设定大小
         rw,rh = opts.reduce_image_to
-        ratio = min(float(rw)/float(new_size[0]), float(rh)/float(new_size[0]))
-        imgnew = imgnew.resize((int(new_size[0]*ratio), int(new_size[1]*ratio)))
+        ratio = min(float(rw) / float(new_size[0]), float(rh) / float(new_size[1]))
+        imgnew = imgnew.resize((int(new_size[0] * ratio), int(new_size[1] * ratio)))
         data = StringIO.StringIO()
         imgnew.save(data, 'JPEG')
         return data.getvalue()
@@ -359,18 +366,24 @@ class Worker(BaseHandler):
         id_, href = oeb.manifest.generate('masthead', DEFAULT_MASTHEAD) # size:600*60
         oeb.manifest.add(id_, href, MimeFromFilename(DEFAULT_MASTHEAD))
         oeb.guide.add('masthead', 'Masthead Image', href)
-        
+
         id_, href = oeb.manifest.generate('cover', DEFAULT_COVER)
         item = oeb.manifest.add(id_, href, MimeFromFilename(DEFAULT_COVER))
 
         oeb.guide.add('cover', 'Cover', href)
         oeb.metadata.add('cover', id_)
-            
+
         itemcnt, imgindex = 0, 0
         sections = OrderedDict()
         toc_thumbnails = {} #map img-url -> manifest-href
 
-        book = CartoonMadBaseBook(imgindex=imgindex, opts=opts, user=user)
+        if feed.url.startswith( ("http://ac.qq.com", "http://m.ac.qq.com") ):
+            book = TencentBaseBook(imgindex=imgindex, opts=opts, user=user)
+        elif feed.url.startswith( "http://www.cartoonmad.com" ):
+            book = CartoonMadBaseBook(imgindex=imgindex, opts=opts, user=user)
+        else:
+            return "Failed to push book <%s>!"%title
+
         book.title = feed.title
         book.description = feed.title
         book.language = language
@@ -384,7 +397,7 @@ class Worker(BaseHandler):
             for sec_or_media, url, title, content, brief, thumbnail in book.Items():
                 if not sec_or_media or not title or not content:
                     continue
-                
+
                 if sec_or_media.startswith(r'image/'):
                     id_, href = oeb.manifest.generate(id='img', href=title)
                     item = oeb.manifest.add(id_, href, sec_or_media, data=content)
@@ -402,8 +415,8 @@ class Worker(BaseHandler):
             excFileName, excFuncName, excLineNo = get_exc_location()
             main.log.warn("Failed to push <%s> : %s, in file '%s', %s (line %d)" % (
                 book.title, str(e), excFileName, excFuncName, excLineNo))
-            return "Failed to push book <%s>!"%title 
-        
+            return "Failed to push book <%s>!"%title
+
         volumeTitle = ''
         if itemcnt > 0:
             insertHtmlToc = False
@@ -411,7 +424,7 @@ class Worker(BaseHandler):
             volumeTitle = book.LastDeliveredVolume()
             oeb.metadata.clear('title')
             oeb.metadata.add('title', feed.title + volumeTitle)
-            
+
             InsertToc(oeb, sections, toc_thumbnails, insertHtmlToc, insertThumbnail)
             oIO = byteStringIO()
             o = EPUBOutput() if user.book_type == "epub" else MOBIOutput()
